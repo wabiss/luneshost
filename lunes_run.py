@@ -1,10 +1,44 @@
 import os
 import time
 import json
+import requests
 from playwright.sync_api import sync_playwright
 
 SERVER_URL = os.getenv("LUNES_SERVER_URL")
 LUNES_COOKIES = os.getenv("LUNES_COOKIES")
+
+def send_tg_notification(message, photo_path=None):
+    """发送结果和运行截图至 Telegram"""
+    token = os.getenv("TG_BOT_TOKEN")
+    chat_id = os.getenv("TG_CHAT_ID")
+    if not token or not chat_id:
+        print("未配置 TG 机器人变量，跳过发送 TG 推送。")
+        return
+
+    # 1. 发送文字通知
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, json=payload)
+        print("TG 状态通知发送成功。")
+    except Exception as e:
+        print(f"发送 TG 消息异常: {e}")
+
+    # 2. 发送截图照片
+    if photo_path and os.path.exists(photo_path):
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                files = {"photo": f}
+                data = {"chat_id": chat_id, "caption": "运行实时画面"}
+                requests.post(url, data=data, files=files)
+            print("TG 实时截图发送成功。")
+        except Exception as e:
+            print(f"发送 TG 截图异常: {e}")
 
 def run():
     if not SERVER_URL or not LUNES_COOKIES:
@@ -73,6 +107,7 @@ def run():
 
         except Exception as e:
             print(f"凭证解析/注入失败: {e}")
+            send_tg_notification(f"❌ <b>Lunes Host 运行异常</b>\n解析注入凭证失败: {e}")
             browser.close()
             return
 
@@ -80,18 +115,21 @@ def run():
         print(f"正在访问 Lunes Host 控制面板: {SERVER_URL}")
         page.goto(SERVER_URL)
         
-        # 停留 15 秒，确保 Lunes 服务器接收到完整的心跳和登录活跃统计
+        # 停留 15 秒确保完成登录记录
         page.wait_for_timeout(15000)
 
-        # 保存打卡截图
+        # 保存截图作为打卡凭证
         page.screenshot(path="lunes_debug_screenshot.png")
-        print("已截取登录打卡画面。")
 
-        # 判断是否登录失效
+        # 判断是否登录失效并推送 TG
         if "login" in page.url or page.locator("input[type='email']").first.is_visible():
-            print("登录失效，请重新用控制台脚本导出凭证并更新 LUNES_COOKIES。")
+            msg = "❌ <b>Lunes Host 登录失效！</b>\n请在浏览器控制台重新运行脚本生成 LUNES_COOKIES。"
+            print(msg)
+            send_tg_notification(msg, "lunes_debug_screenshot.png")
         else:
-            print("✓ 每日登录打卡成功！已成功向 Lunes Host 刷新登录活跃状态。")
+            msg = "✅ <b>Lunes Host 每日打卡保活成功！</b>\n已成功刷新活跃会话状态。"
+            print(msg)
+            send_tg_notification(msg, "lunes_debug_screenshot.png")
 
         browser.close()
 
