@@ -20,29 +20,39 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 安装 seleniumbase 和 requests
           pip install seleniumbase requests
 
       - name: Set up WARP
         uses: fscarmen/warp-on-actions@v1.4
         with:
-          mode: client  # 指定运行官方客户端模式，避免 TUN 虚拟网卡劫持系统网络
+          mode: client
           stack: dual
 
-      # ====== 核心步骤：将 WARP 设为本地代理，并启动连接 ======
+      # ====== 核心修复：断开连接 -> 切换模式 -> 重新连接 ======
       - name: Configure WARP Proxy Mode
         run: |
-          echo "正在将 WARP 切换至 SOCKS5 代理模式..."
-          # 设置为局部代理模式
-          sudo warp-cli --accept-tos mode proxy || true
-          # 将本地代理端口强制指定为 40000 (默认也是这个)
+          echo "=== 1. 彻底断开 WARP 全局网卡连接 ==="
+          sudo warp-cli --accept-tos disconnect || true
+          sleep 3
+
+          echo "=== 2. 切换为局部 SOCKS5 代理模式 (Proxy Mode) ==="
+          # 兼容新旧不同版本的 cli 语法
+          sudo warp-cli --accept-tos mode proxy || sudo warp-cli --accept-tos set-mode proxy || true
+
+          echo "=== 3. 设定本地代理端口为 40000 ==="
           sudo warp-cli --accept-tos proxy port 40000 || sudo warp-cli --accept-tos set-proxy-port 40000 || true
-          # 启动连接
+
+          echo "=== 4. 重新启动 WARP 连接 ==="
           sudo warp-cli --accept-tos connect || true
-          echo "等待 5 秒建立代理连接..."
           sleep 5
-          # 在系统终端测试该代理是否可以正常访问网络，如果成功会显示 warp=on
-          curl --socks5-hostname 127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace || true
+
+          echo "=== 5. 【网络诊断】测试系统主网卡（不走代理，用于验证断网已恢复） ==="
+          # 如果这里返回了普通的 IP 且没有报错，说明虚拟机网络恢复正常
+          curl --connect-timeout 5 https://ifconfig.me || echo "❌ 虚拟机全局网络依然断开！"
+
+          echo "=== 6. 【代理诊断】测试 SOCKS5 代理网络是否通畅 ==="
+          # 检查 127.0.0.1:40000 代理是否成功代理出站
+          curl -I --connect-timeout 5 --socks5-hostname 127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace || echo "❌ WARP SOCKS5 代理无法使用！"
 
       - name: Run check script
         env:
