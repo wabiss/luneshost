@@ -2,9 +2,9 @@ import os
 import time
 import json
 import urllib.parse
-import random
 import requests
-from playwright.sync_api import sync_playwright
+# 引入 SeleniumBase 高级过盾包
+from seleniumbase import SB
 
 SERVER_URL = os.getenv("LUNES_SERVER_URL")
 LUNES_EMAIL = os.getenv("LUNES_EMAIL")
@@ -41,228 +41,114 @@ def send_tg_notification(message, photo_path=None):
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
-def check_is_cf_page(page):
-    """检测当前是否仍卡在验证码页面"""
-    try:
-        child_frames = [f for f in page.frames if f != page.main_frame]
-        return len(child_frames) > 0
-    except Exception:
-        return True
-
-def goto_with_dns_retry(page, url, retries=3):
-    """【智能加载与 DNS 防抖重试算法】：防止 WARP 代理或 WAF 发生偶发性 NXDOMAIN 解析失败"""
-    for i in range(retries):
-        try:
-            print(f"正在尝试加载页面 (第 {i+1}/{retries} 次尝试): {url}")
-            page.goto(url)
-            page.wait_for_timeout(5000) # 给予 5 秒加载时间
-            
-            # 抓取页面内容进行网络错误判定
-            page_content_lower = page.content().lower()
-            if "dns_probe_finished_nxdomain" in page_content_lower or "can’t be reached" in page_content_lower or "something went wrong" in page_content_lower:
-                print(f"⚠️ 检测到 DNS 解析失败 (NXDOMAIN) 或网络连接异常，原地等待 5 秒后执行自动重试...")
-                page.wait_for_timeout(5000)
-                continue
-            
-            return True
-        except Exception as e:
-            print(f"访问页面发生异常: {e}，原地等待 5 秒后执行自动重试...")
-            page.wait_for_timeout(5000)
-    return False
-
-def load_page_with_cf_bypass(page, url):
-    """智能页面加载函数：自动等待并利用物理位置模拟点击穿透 Cloudflare 的人机验证"""
-    # 采用带有重试机制的强力页面访问
-    success = goto_with_dns_retry(page, url)
-    if not success:
-        print("❌ 错误: 经过多次重试仍无法加载页面，已触发网络阻断。")
-        return
-
-    # 包含可能出现的各种 Cloudflare iframe 标志，以 iframe 作为保底
-    cf_selectors = [
-        "iframe[src*='challenge-platform']",
-        "iframe[src*='challenges.cloudflare.com']",
-        "iframe"
-    ]
-    
-    iframe_selector = ""
-    for _ in range(15):
-        for selector in cf_selectors:
-            try:
-                if page.locator(selector).first.is_visible():
-                    iframe_selector = selector
-                    break
-            except Exception:
-                pass
-        if iframe_selector:
-            break
-        page.wait_for_timeout(1000)
-
-    if iframe_selector:
-        print(f"⚡ 检测到 Cloudflare 验证盾 iframe 元素 ('{iframe_selector}')！正在尝试过盾...")
-        page.wait_for_timeout(3000)
-        
-        try:
-            # 读取绝对物理坐标
-            box = page.locator(iframe_selector).first.bounding_box()
-            if box:
-                print(f"定位到验证盾坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
-                
-                # 理论复选框正中心
-                click_x = box["x"] + 35
-                click_y = box["y"] + box["height"] / 2
-                
-                print(f"正在模拟真人鼠标平滑移动至 ({click_x:.1f}, {click_y:.1f}) 并执行物理按压点击...")
-                page.mouse.move(click_x, click_y, steps=15)
-                page.wait_for_timeout(random.randint(400, 800))
-                page.mouse.down()
-                page.wait_for_timeout(random.randint(100, 180))
-                page.mouse.up()
-                page.wait_for_timeout(6000)
-        except Exception as e:
-            print(f"模拟鼠标点击过程中发生异常: {e}")
-    else:
-        print("页面未检测到验证盾，或已成功跳过。")
-        
-    page.wait_for_timeout(3000)
-
-def login_lunes(page, email, password):
-    """模拟真人输入账号密码，并物理攻克登录表单下方的嵌入式验证盾"""
-    print("正在访问 Lunes Host 登录界面...")
-    # 直接进军最真实的登录页（自带网络重试过盾）
-    load_page_with_cf_bypass(page, "https://betadash.lunes.host/login")
-    
-    # 拍照留档
-    page.screenshot(path="lunes_debug_screenshot.png")
-
-    try:
-        print("正在定位账号密码输入框并填充...")
-        # 1. 精准填充邮箱
-        email_input = page.locator("input[type='email']").first
-        email_input.wait_for(state="visible", timeout=15000)
-        email_input.fill(email)
-
-        # 2. 精准填充密码
-        password_input = page.locator("input[type='password']").first
-        password_input.fill(password)
-        page.wait_for_timeout(1000)
-
-        # 3. 核心大招：自动扫描并检测登录表单下方是否内嵌了验证码（Verify you are human）
-        print("正在检测登录表单下方是否存在内嵌验证码...")
-        turnstile_frame = None
-        for i in range(10):
-            child_frames = [f for f in page.frames if f != page.main_frame]
-            if len(child_frames) > 0:
-                turnstile_frame = child_frames[0]
-                break
-            page.wait_for_timeout(1000)
-
-        if turnstile_frame:
-            print("⚡ 成功捕获到表单下方的嵌入式人机验证码！")
-            page.wait_for_timeout(3000)
-            try:
-                # 穿透影子 DOM，利用 frame_element().bounding_box() 夺取该嵌入验证盾在当前屏幕上的最精确像素坐标
-                iframe_handle = turnstile_frame.frame_element()
-                box = iframe_handle.bounding_box()
-                if box:
-                    print(f"✓ 成功获取嵌入验证盾物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
-                    # 复选框黄金中心坐标
-                    click_x = box["x"] + 35
-                    click_y = box["y"] + box["height"] / 2
-                    
-                    print(f"正在模拟真人平滑移动至 ({click_x:.1f}, {click_y:.1f}) 并点击勾选人机验证...")
-                    page.mouse.move(click_x, click_y, steps=15)
-                    page.wait_for_timeout(random.randint(400, 800))
-                    page.mouse.down()
-                    page.wait_for_timeout(random.randint(100, 180))
-                    page.mouse.up()
-                    
-                    # 给予 8 秒判定时间
-                    page.wait_for_timeout(8000)
-            except Exception as e:
-                print(f"尝试物理点击嵌入验证码时发生异常: {e}")
-
-        # 4. 点击 Continue 按钮提交登录
-        submit_btn = page.locator("button:has-text('Continue'), button[type='submit']").first
-        if submit_btn.is_visible():
-            print("正在点击 Continue 提交表单...")
-            submit_btn.click()
-            page.wait_for_timeout(10000)
-
-        # 再次利用网络防抖重新定向检查登录是否成功
-        current_url = page.url
-        if "login" in current_url or page.locator("input[type='email']").first.is_visible():
-            print("❌ 自动登录失败：仍停留在登录页面。")
-            return False
-
-        print("✓ 自动登录成功！")
-        return True
-    except Exception as e:
-        print(f"❌ 自动登录过程中发生异常: {e}")
-        return False
-
 def run():
     if not SERVER_URL or not LUNES_EMAIL or not LUNES_PASSWORD:
-        print("错误: 缺少必要配置 LUNES_SERVER_URL、LUNES_EMAIL 或 LUNES_PASSWORD")
+        print("错误: 缺少 LUNES_SERVER_URL、LUNES_EMAIL 或 LUNES_PASSWORD 环境变量")
         return
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox"
-            ]
-        )
+    # 1. 启动 SeleniumBase 并开启 UC 模式与 Xvfb 虚拟系统桌面
+    with SB(uc=True, xvfb=True) as sb:
         
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 720}
-        )
+        # ⚡ 核心改进：引入 3 次 DNS 抗抖重试机制，完美穿透 WARP 的 NXDOMAIN 解析错误
+        success = False
+        for i in range(3):
+            try:
+                print(f"正在访问 Lunes Host 登录界面 (第 {i+1}/3 次尝试)...")
+                sb.uc_open_with_reconnect("https://betadash.lunes.host/login", reconnect_time=8)
+                sb.sleep(5)
+                
+                # 检查页面是否由于网络解析异常加载失败
+                current_url = sb.get_current_url()
+                page_source_lower = sb.get_page_source().lower()
+                if "dns_probe_finished_nxdomain" in page_source_lower or "can’t be reached" in page_source_lower or "something went wrong" in page_source_lower:
+                    print("⚠️ 检测到 DNS 解析失败 (NXDOMAIN) 或连接异常，原地等待 5 秒后执行自动重试...")
+                    sb.sleep(5)
+                    continue
+                
+                success = True
+                break
+            except Exception as e:
+                print(f"访问页面发生异常: {e}，原地等待 5 秒后执行自动重试...")
+                sb.sleep(5)
 
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        if not success:
+            print("❌ 错误: 经过 3 次重试仍无法加载页面，已触发网络阻断。")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification("❌ <b>Lunes Host 访问失败</b>\n经过 3 次重试仍无法加载 Lunes 登录页（可能遭遇临时线路阻断）。", "lunes_debug_screenshot.png")
+            return
 
-        page = context.new_page()
+        # 2. 核心过盾：自动寻找并执行系统物理级点击，过掉最外层的 Cloudflare 验证盾
+        sb.save_screenshot("lunes_debug_screenshot.png")
+        try:
+            print("正在检测并调用系统级 PyAutoGUI 驱动，物理点击最外层 Cloudflare 验证盾...")
+            sb.uc_gui_click_captcha()
+            sb.sleep(10) # 给予 10 秒跳转缓冲
+            sb.save_screenshot("lunes_debug_screenshot.png")
+        except Exception as e:
+            print(f"验证盾点击结束或已被跳过: {e}")
 
-        # 全局流量拦截
-        def handle_route(route):
-            headers = {**route.request.headers}
-            headers["sec-ch-ua"] = '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
-            headers["sec-ch-ua-mobile"] = "?0"
-            headers["sec-ch-ua-platform"] = '"Windows"'
-            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            route.continue_(headers=headers)
-
-        page.route("**/*", handle_route)
-
-        # 执行自动登录（内置表单内嵌盾自动点击）
-        if login_lunes(page, LUNES_EMAIL, LUNES_PASSWORD):
-            print(f"正在跳转至目标保活控制面板: {SERVER_URL}")
-            page.goto(SERVER_URL)
+        # 3. 填充表单
+        try:
+            print("正在定位账号密码输入框并填充...")
+            # 阻塞式等待邮箱输入框渲染
+            sb.wait_for_element_visible("input[type='email']", timeout=15)
+            sb.update_text("input[type='email']", LUNES_EMAIL)
             
-            # 停留 15 秒，确保 Lunes 服务器接收到完整的登录活跃打卡心跳
-            page.wait_for_timeout(15000)
+            # 填充密码
+            sb.update_text("input[type='password']", LUNES_PASSWORD)
+            sb.sleep(1)
 
-            # 保存打卡截图
-            page.screenshot(path="lunes_debug_screenshot.png")
-            print("已截取登录打卡画面。")
+            # 4. 点击“记住我”
+            if sb.is_element_visible("input[type='checkbox']"):
+                sb.click("input[type='checkbox']")
+                print("已成功勾选记住我。")
 
-            if "login" in page.url or page.locator("input[type='email']").first.is_visible():
-                msg = "❌ <b>Lunes Host 登录失效！</b>\n跳转至面板页面时，发现仍处于登录页面状态。"
-                print(msg)
-                send_tg_notification(msg, "lunes_debug_screenshot.png")
-            else:
-                msg = "✅ <b>Lunes Host 每日自动登录打卡成功！</b>\n已通过账号密码模式刷新控制面板活跃状态。"
-                print(msg)
-                send_tg_notification(msg, "lunes_debug_screenshot.png")
-        else:
-            page.screenshot(path="lunes_debug_screenshot.png")
-            msg = "❌ <b>Lunes Host 运行异常</b>\n使用账号密码执行第一步自动登录时失败。"
+            # 5. 核心过盾 2：自动检测并物理点击登录表单下方内嵌的验证盾
+            try:
+                print("正在检测并物理点击登录表单下方内嵌的验证盾...")
+                sb.uc_gui_click_captcha()
+                sb.sleep(5)
+            except Exception as e:
+                print(f"表单内嵌验证盾处理完成: {e}")
+
+            # 6. 点击 Continue 按钮提交登录
+            submit_btn_selector = "button:contains('Continue'), button:contains('Zaloguj'), button[type='submit']"
+            if sb.is_element_visible(submit_btn_selector):
+                print("正在点击 Continue 提交表单...")
+                sb.click(submit_btn_selector)
+                sb.sleep(10) # 等待登录跳转
+        except Exception as e:
+            print(f"❌ 自动登录过程中发生异常: {e}")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification(f"❌ <b>Lunes Host 运行异常</b>\n执行自动填表登录时失败: {e}", "lunes_debug_screenshot.png")
+            return
+
+        # 7. 验证登录状态并跳转至保活目标页
+        current_url = sb.get_current_url()
+        if "login" in current_url or sb.is_element_visible("input[type='email']"):
+            print("❌ 自动登录失败：仍停留在登录页面。")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification("❌ <b>Lunes Host 自动登录失败</b>\n未能成功进入后台系统。", "lunes_debug_screenshot.png")
+            return
+
+        print(f"✓ 登录成功！正在跳转至目标保活控制面板: {SERVER_URL}")
+        sb.open(SERVER_URL)
+        
+        # 停留 15 秒，确保 Lunes 服务器接收到完整的打卡活跃心跳
+        sb.sleep(15)
+
+        # 保存打卡完成截图
+        sb.save_screenshot("lunes_debug_screenshot.png")
+        print("已截取登录打卡画面。")
+
+        if "login" in sb.get_current_url() or sb.is_element_visible("input[type='email']"):
+            msg = "❌ <b>Lunes Host 登录失效！</b>\n跳转至面板页面时，发现状态退回到了未登录状态。"
             print(msg)
             send_tg_notification(msg, "lunes_debug_screenshot.png")
-
-        browser.close()
+        else:
+            msg = "✅ <b>Lunes Host 每日自动登录打卡成功！</b>\n已通过账号密码 + 物理双重过盾机制刷新控制面板活跃状态。"
+            print(msg)
+            send_tg_notification(msg, "lunes_debug_screenshot.png")
 
 if __name__ == "__main__":
     run()
