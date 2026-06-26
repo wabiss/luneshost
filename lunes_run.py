@@ -1,5 +1,8 @@
 import os
 import time
+import json
+import urllib.parse
+import random
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -38,48 +41,130 @@ def send_tg_notification(message, photo_path=None):
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
-def login_lunes(page, email, password):
-    """模拟真人输入账号密码直接在 Lunes Host 登录"""
-    print("正在尝试使用账号密码登录 Lunes Host...")
+def check_is_cf_page(page):
+    """检测当前是否仍卡在验证码页面"""
     try:
-        # 访问登录页
-        page.goto("https://betadash.lunes.host/auth/login")
+        child_frames = [f for f in page.frames if f != page.main_frame]
+        return len(child_frames) > 0
+    except Exception:
+        return True
+
+def load_page_with_cf_bypass(page, url):
+    """智能页面加载函数：自动等待并利用物理位置模拟点击穿透 Cloudflare 的人机验证"""
+    print(f"正在访问页面: {url}")
+    page.goto(url)
+    page.wait_for_timeout(6000)
+
+    # 包含可能出现的各种 Cloudflare iframe 标志，以 iframe 作为保底
+    cf_selectors = [
+        "iframe[src*='challenge-platform']",
+        "iframe[src*='challenges.cloudflare.com']",
+        "iframe"
+    ]
+    
+    iframe_selector = ""
+    for _ in range(15):
+        for selector in cf_selectors:
+            try:
+                if page.locator(selector).first.is_visible():
+                    iframe_selector = selector
+                    break
+            except Exception:
+                pass
+        if iframe_selector:
+            break
+        page.wait_for_timeout(1000)
+
+    if iframe_selector:
+        print(f"⚡ 检测到 Cloudflare 验证盾 iframe 元素 ('{iframe_selector}')！正在尝试过盾...")
         page.wait_for_timeout(3000)
-
-        if "login" not in page.url:
-            page.goto("https://betadash.lunes.host/login")
-            page.wait_for_timeout(3000)
-
-        # 1. 输入邮箱/用户名
-        username_input = page.locator("input[name='username']").first
-        if not username_input.is_visible():
-            username_input = page.locator("input[type='text']").first
-        if not username_input.is_visible():
-            username_input = page.locator("input[type='email']").first
         
-        username_input.fill(email)
+        try:
+            # 读取绝对物理坐标
+            box = page.locator(iframe_selector).first.bounding_box()
+            if box:
+                print(f"定位到验证盾坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
+                
+                # 理论复选框正中心
+                click_x = box["x"] + 35
+                click_y = box["y"] + box["height"] / 2
+                
+                print(f"正在模拟真人鼠标平滑移动至 ({click_x:.1f}, {click_y:.1f}) 并执行物理按压点击...")
+                page.mouse.move(click_x, click_y, steps=15)
+                page.wait_for_timeout(random.randint(400, 800))
+                page.mouse.down()
+                page.wait_for_timeout(random.randint(100, 180))
+                page.mouse.up()
+                page.wait_for_timeout(6000)
+        except Exception as e:
+            print(f"模拟鼠标点击过程中发生异常: {e}")
+    else:
+        print("页面未检测到验证盾，或已成功跳过。")
+        
+    page.wait_for_timeout(3000)
 
-        # 2. 输入密码
+def login_lunes(page, email, password):
+    """模拟真人输入账号密码，并物理攻克登录表单下方的嵌入式验证盾"""
+    print("正在访问 Lunes Host 登录界面...")
+    # 直接进军最真实的登录页，并通过 load_page_with_cf_bypass 过掉可能阻挡在最外层的验证盾
+    load_page_with_cf_bypass(page, "https://betadash.lunes.host/login")
+    
+    # 拍照留档
+    page.screenshot(path="lunes_debug_screenshot.png")
+
+    try:
+        print("正在定位账号密码输入框并填充...")
+        # 1. 精准填充邮箱
+        email_input = page.locator("input[type='email']").first
+        email_input.wait_for(state="visible", timeout=15000)
+        email_input.fill(email)
+
+        # 2. 精准填充密码
         password_input = page.locator("input[type='password']").first
         password_input.fill(password)
+        page.wait_for_timeout(1000)
 
-        # 3. 勾选“记住我”
-        remember_checkbox = page.locator("input[type='checkbox']").first
-        if remember_checkbox.is_visible():
-            remember_checkbox.check()
+        # 3. 核心大招：自动扫描并检测登录表单下方是否内嵌了验证码（Verify you are human）
+        print("正在检测登录表单下方是否存在内嵌验证码...")
+        turnstile_frame = None
+        for i in range(10):
+            child_frames = [f for f in page.frames if f != page.main_frame]
+            if len(child_frames) > 0:
+                turnstile_frame = child_frames[0]
+                break
+            page.wait_for_timeout(1000)
 
-        # 4. 点击登录
-        submit_btn = page.locator("button[type='submit']").first
-        if not submit_btn.is_visible():
-            submit_btn = page.locator("button:has-text('Login')").first
-        if not submit_btn.is_visible():
-            submit_btn = page.locator("button:has-text('Zaloguj')").first
-        if not submit_btn.is_visible():
-            submit_btn = page.locator("button:has-text('登录')").first
+        if turnstile_frame:
+            print("⚡ 成功捕获到表单下方的嵌入式人机验证码！")
+            page.wait_for_timeout(3000)
+            try:
+                # 穿透影子 DOM，利用 frame_element().bounding_box() 夺取该嵌入验证盾在当前屏幕上的最精确像素坐标
+                iframe_handle = turnstile_frame.frame_element()
+                box = iframe_handle.bounding_box()
+                if box:
+                    print(f"✓ 成功获取嵌入验证盾物理坐标: x={box['x']:.1f}, y={box['y']:.1f}, w={box['width']:.1f}, h={box['height']:.1f}")
+                    # 复选框黄金中心坐标
+                    click_x = box["x"] + 35
+                    click_y = box["y"] + box["height"] / 2
+                    
+                    print(f"正在模拟真人平滑移动至 ({click_x:.1f}, {click_y:.1f}) 并点击勾选人机验证...")
+                    page.mouse.move(click_x, click_y, steps=15)
+                    page.wait_for_timeout(random.randint(400, 800))
+                    page.mouse.down()
+                    page.wait_for_timeout(random.randint(100, 180))
+                    page.mouse.up()
+                    
+                    # 给予 8 秒判定时间
+                    page.wait_for_timeout(8000)
+            except Exception as e:
+                print(f"尝试物理点击嵌入验证码时发生异常: {e}")
 
-        submit_btn.click()
-        print("登录表单已提交，等待页面跳转...")
-        page.wait_for_timeout(10000)
+        # 4. 点击 Continue 按钮提交登录
+        submit_btn = page.locator("button:has-text('Continue'), button[type='submit']").first
+        if submit_btn.is_visible():
+            print("正在点击 Continue 提交表单...")
+            submit_btn.click()
+            page.wait_for_timeout(10000)
 
         if "login" in page.url:
             print("❌ 自动登录失败：仍停留在登录页面。")
@@ -115,7 +200,18 @@ def run():
 
         page = context.new_page()
 
-        # 执行自动登录
+        # 全局流量拦截
+        def handle_route(route):
+            headers = {**route.request.headers}
+            headers["sec-ch-ua"] = '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"'
+            headers["sec-ch-ua-mobile"] = "?0"
+            headers["sec-ch-ua-platform"] = '"Windows"'
+            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            route.continue_(headers=headers)
+
+        page.route("**/*", handle_route)
+
+        # 执行自动登录（内置表单内嵌盾自动点击）
         if login_lunes(page, LUNES_EMAIL, LUNES_PASSWORD):
             print(f"正在跳转至目标保活控制面板: {SERVER_URL}")
             page.goto(SERVER_URL)
