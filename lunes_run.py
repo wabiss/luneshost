@@ -46,10 +46,10 @@ def run():
         print("错误: 缺少 LUNES_SERVER_URL、LUNES_EMAIL 或 LUNES_PASSWORD 环境变量")
         return
 
-    # ====== 核心改动：在 SB() 启动时传入 proxy 属性，让 Chrome 浏览器通过 WARP 代理访问网络 ======
+    # 启动 SeleniumBase 并配置代理指向 WARP 的 40000 端口
     with SB(uc=True, xvfb=True, proxy="socks5://127.0.0.1:40000") as sb:
         
-        # ⚡ 引入 3 次 DNS 抗抖重试机制，完美穿透 WARP 的 NXDOMAIN 解析错误
+        # ⚡ 3 次 DNS 抗抖重试机制
         success = False
         for i in range(3):
             try:
