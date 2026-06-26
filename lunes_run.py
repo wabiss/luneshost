@@ -46,10 +46,10 @@ def run():
         print("错误: 缺少 LUNES_SERVER_URL、LUNES_EMAIL 或 LUNES_PASSWORD 环境变量")
         return
 
-    # 1. 启动 SeleniumBase 并开启 UC 模式与 Xvfb 虚拟系统桌面
-    with SB(uc=True, xvfb=True) as sb:
+    # ====== 核心改动：在 SB() 启动时传入 proxy 属性，让 Chrome 浏览器通过 WARP 代理访问网络 ======
+    with SB(uc=True, xvfb=True, proxy="socks5://127.0.0.1:40000") as sb:
         
-        # ⚡ 核心改进：引入 3 次 DNS 抗抖重试机制，完美穿透 WARP 的 NXDOMAIN 解析错误
+        # ⚡ 引入 3 次 DNS 抗抖重试机制，完美穿透 WARP 的 NXDOMAIN 解析错误
         success = False
         for i in range(3):
             try:
